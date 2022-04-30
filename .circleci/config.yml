@@ -33,8 +33,6 @@ jobs:
       - run: sudo apt-get install shellcheck --assume-yes --no-install-recommends
       - run: shellcheck scripts/dev_setup.sh
       - run: shellcheck scripts/dockerhub_prune.sh
-      - run: shellcheck docker/build_push.sh
-      - run: shellcheck docker/docker_republish.sh
       - run: shellcheck scripts/weekly-dep-report.sh
       - run: cargo x lint
       - run: cargo xclippy --workspace --all-targets
@@ -60,7 +58,7 @@ jobs:
       - run: echo "export INDEXER_DATABASE_URL=postgresql://postgres@localhost/postgres" >> $BASH_ENV
       - run: cargo nextest --nextest-profile ci --partition hash:1/1 --unit --exclude backup-cli --changed-since "origin/main"
   docker-build-push:
-    executor: ubuntu-medium
+    executor: ubuntu-2xl
     parameters:
       addl_tag:
         description: Additional image tag
@@ -68,35 +66,15 @@ jobs:
         default: latest
     steps:
       - checkout
-      - aws-setup
-      - run: echo "export IMAGE_TAG=dev_$(git rev-parse --short=8 HEAD)" >> $BASH_ENV
-      - run: echo "export ADDL_IMAGE_TAG=<<parameters.addl_tag>>_$(git rev-parse --short=8 HEAD)" >> $BASH_ENV
+      - aws-ecr-setup
+      - run: echo $GITHUB_CONTAINER_REGISTRY_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
       - run:
-          name: Build or skip
+          name: Build and Push
           shell: /bin/bash
           command: |
-            # Check if an image is already built at this image tag
-            MANIFEST=$(aws ecr batch-get-image --repository-name aptos/validator --image-ids imageTag=$IMAGE_TAG --query 'images[].imageManifest' --output text)
-            echo $MANIFEST
-            if [ -z "$MANIFEST" ]; then
-              echo "Image tag $IMAGE_TAG not present. Starting build all..."
-              ./docker/build-aws.sh --build-all --version $(git rev-parse --short=8 HEAD) --addl_tags "<<parameters.addl_tag>>,${ADDL_IMAGE_TAG}"
-            else
-              echo "Image tag $IMAGE_TAG already present. Skipping build..."
-              echo "Continue retagging to <<parameters.addl_tag>>"
-              ret=0
-              for img in "${AWS_ECR_IMAGES[@]}"
-              do
-                # Get the image manifest for the already-built image and put it at different image tags
-                MANIFEST=$(aws ecr batch-get-image --repository-name aptos/${img} --image-ids imageTag=$IMAGE_TAG --query 'images[].imageManifest' --output text)
-                put_img_out=$(aws ecr put-image --repository-name aptos/${img} --image-tag "<<parameters.addl_tag>>" --image-manifest "$MANIFEST" 2>&1)
-                put_img_out_addl=$(aws ecr put-image --repository-name aptos/${img} --image-tag "${ADDL_IMAGE_TAG}" --image-manifest "$MANIFEST" 2>&1)
-                ret=$?
-                # ok if image tag exists and cannot overwrite
-                echo $put_img_out $put_img_out_addl | grep 'ImageAlreadyExistsException' && ret=0
-              done
-              exit $ret
-            fi
+              set -e
+              docker buildx create --use
+              docker/docker-bake-rust-all.sh
   build-push-community-platform:
     executor: ubuntu-medium
     steps:
@@ -285,14 +263,14 @@ workflows:
       - unit-test
       - docker-build-push:
           context: aws-dev
-      - ecosystem-test:
-          context: aws-dev
-          requires:
-            - docker-build-push
-      - forge-k8s-test:
-          context: aws-dev
-          requires:
-            - docker-build-push
+      # - ecosystem-test:e
+      #     context: aws-dev
+      #     requires:
+      #       - docker-build-push
+      # - forge-k8s-test:
+      #     context: aws-dev
+      #     requires:
+      #       - docker-build-push
   ### on devnet branch update ###
   # Ensure the latest is built on the "devnet" branch, and mirror from ECR to Dockerhub
   devnet-branch-cut:
